@@ -1,6 +1,6 @@
 OWNER=rasmunk
 IMAGE=swarmspawner
-TAG=edge
+TAG=devel
 
 .PHONY: build
 
