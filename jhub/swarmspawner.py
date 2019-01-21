@@ -6,6 +6,8 @@ server in a separate Docker Service
 import hashlib
 import docker
 import copy
+import random
+import string
 from asyncio import sleep
 from async_generator import async_generator, yield_
 from textwrap import dedent
@@ -23,11 +25,11 @@ from traitlets import (
     Dict,
     Unicode,
     List,
+    Instance,
     Bool,
     Int
 )
 from jhub.mount import VolumeMounter
-
 
 class UnicodeOrFalse(Unicode):
     info_text = 'a unicode string or False'
@@ -39,80 +41,67 @@ class UnicodeOrFalse(Unicode):
 
 
 class SwarmSpawner(Spawner):
-    """A Spawner for JupyterHub using Docker Engine in Swarm mode
-    Makes a list of docker images available for the user to spawn
-    Specify in the jupyterhub configuration file which are allowed:
-    e.g.
+    """A Spawner for JupyterHub using Docker Engine in Swarm mode"""
 
-    c.JupyterHub.spawner_class = 'jhub.SwarmSpawner'
-    # Available docker images the user can spawn
-    c.SwarmSpawner.dockerimages = [
-        {'image': 'nielsbohr/base-notebook:latest',
-        'name': 'Default jupyter notebook'}
+    service_id = Unicode()
+    service_port = Int(8888, min=1, max=65535, config=True)
+    service_prefix = Unicode(
+        "jupyter", config=True,
+        help="Prefix for service names. The full service name for a particular "
+        "user will be <prefix>-<hash(username)>-<server_name>.")
 
-    ]
-
-    The images must be locally available before the user can spawn them
-    """
-
-    dockerimages = List(
-        trait=Dict(),
-        default_value=[{'image': 'nielsbohr/base-notebook:latest',
-                        'name': 'Default jupyter notebook'}],
-        minlen=1,
+    tls_config = Dict(
         config=True,
-        help="Docker images that are available to the user of the host"
+        help=dedent(
+            """Arguments to pass to docker TLS configuration.
+            Check for more info:
+            http://docker-py.readthedocs.io/en/stable/tls.html
+            """
+        )
     )
 
-    form_template = Unicode("""
+    jupyterhub_service_name = Unicode(config=True,
+                                      help="Name of the service running the JupyterHub")
+
+    # TaskTemplate parameters
+    container_spec = Dict({'image': 'jupyter/base-notebook',
+                           'args': ['/usr/local/bin/start-singleuser.sh'],
+                           'env': {'JUPYTER_ENABLE_LAB': '1'}
+                           },
+                          config=True,
+                          help="Params to create the service")
+
+    resources = Dict({}, config=True,
+                     help="Params about cpu and memory limits")
+
+    restart_policy = Dict({}, config=True,
+                          help="Params about whether a failing container should restart")
+
+    placement = Dict({}, config=True,
+                     help="List of placement constraints into the swarm")
+
+    networks = List([], config=True,
+                    help="Additional args to create_host_config for service create")
+
+    # User Options
+    use_user_options = Bool(False, config=True,
+                            help="the spawner will use the dict passed through the form "
+                            "or as json body when using the Hub Api")
+
+    user_options = List([], config=True,
+                        help="Options that the user is able to provide during spawning")
+
+    _form_template = Unicode("""
         <label for="dockerimage">Select a notebook image:</label>
         <select class="form-control" name="dockerimage" required autofocus>
             {option_template}
-        </select>""", config=True, help="Form template.")
+        </select>""", help="Form template.")
 
-    option_template = Unicode("""
+    _option_template = Unicode("""
         <option value="{image}">{name}</option>""",
-                              config=True,
-                              help="Template for html form options.")
+                               config=True,
+                               help="Template for html form options.")
     _executor = None
-
-    disabled_form = Unicode()
-
-    @default('options_form')
-    def _options_form(self):
-        """Return the form with the drop-down menu."""
-        # User options not enabled -> return default jupyterhub form
-        if not self.use_user_options:
-            return self.disabled_form
-
-        # Support the use of dynamic string replacement
-        if hasattr(self.user, 'mount'):
-            for di in self.dockerimages:
-                if '{replace_me}' in di['name']:
-                    di['name'] = di['name'].replace('{replace_me}',
-                                                    self.user.mount[
-                                                        'HOST'])
-        options = ''.join([
-            self.option_template.format(image=di['image'], name=di['name'])
-            for di in self.dockerimages
-        ])
-        return self.form_template.format(option_template=options)
-
-    def options_from_form(self, form_data):
-        """Parse the submitted form data and turn it into the correct
-           structures for self.user_options."""
-        # user options not enabled, just return input
-        if not self.use_user_options:
-            return form_data
-
-        i_default = self.dockerimages[0]
-        # formdata looks like {'dockerimage': ['jupyterhub/singleuser']}"""
-        image = form_data.get('dockerimage', [i_default])[0]
-        # Don't allow users to input their own images
-        if image not in [image['image'] for image in self.dockerimages]:
-            image = i_default
-        options = {'user_selected_image': image}
-        return options
 
     @property
     def executor(self, max_workers=1):
@@ -128,14 +117,12 @@ class SwarmSpawner(Spawner):
     def client(self):
         """single global client instance"""
         cls = self.__class__
-
         if cls._client is None:
             kwargs = {}
             if self.tls_config:
                 kwargs['tls'] = TLSConfig(**self.tls_config)
             kwargs.update(kwargs_from_env())
             client = docker.APIClient(version='auto', **kwargs)
-
             cls._client = client
         return cls._client
 
@@ -202,8 +189,6 @@ class SwarmSpawner(Spawner):
     @property
     def service_owner(self):
         if self._service_owner is None:
-            m = hashlib.md5()
-            m.update(self.user.name.encode('utf-8'))
             if hasattr(self.user, 'real_name'):
                 self._service_owner = self.user.real_name[-39:]
             elif hasattr(self.user, 'name'):
@@ -212,6 +197,10 @@ class SwarmSpawner(Spawner):
                 # get up to last 40 characters as service identifier
                 self._service_owner = self.user.name[-39:]
             else:
+                m = hashlib.md5()
+                _id = ''.join(random.choice(
+                    string.ascii_uppercase + string.digits) for _ in range(63)).encode('utf-8')
+                m.update(_id)
                 self._service_owner = m.hexdigest()
         return self._service_owner
 
@@ -254,6 +243,36 @@ class SwarmSpawner(Spawner):
     def clear_state(self):
         super().clear_state()
         self.service_id = ''
+
+    @default('options_form')
+    def _options_form(self):
+        """Return the form with the drop-down menu."""
+        # User options not enabled -> return default jupyterhub form
+        if not self.use_user_options:
+            # Not enabled
+            return Unicode()
+
+        options = ''.join([
+            self.option_template.format(image=di['image'], name=di['name'])
+            for di in self.dockerimages
+        ])
+        return self.form_template.format(option_template=options)
+
+    def options_from_form(self, form_data):
+        """Parse the submitted form data and turn it into the correct
+           structures for self.user_options."""
+        # user options not enabled, just return input
+        if not self.use_user_options:
+            return form_data
+
+        i_default = self.dockerimages[0]
+        # formdata looks like {'dockerimage': ['jupyterhub/singleuser']}"""
+        image = form_data.get('dockerimage', [i_default])[0]
+        # Don't allow users to input their own images
+        if image not in [image['image'] for image in self.dockerimages]:
+            image = i_default
+        options = {'user_selected_image': image}
+        return options
 
     @staticmethod
     def _env_keep_default():
@@ -464,58 +483,33 @@ class SwarmSpawner(Spawner):
         You can specify the params for the service through
         jupyterhub_config.py or using the user_options
         """
-        self.log.info("User: {}, start spawn".format(self.user.__dict__))
-
+        self.log.info("User: {}, start spawn with options {}".format(
+            self.user,
+            self.user_options))
         # https://github.com/jupyterhub/jupyterhub
         # /blob/devel/jupyterhub/user.py#L202
         # By default jupyterhub calls the spawner passing user_options
-        if self.use_user_options:
-            user_options = self.user_options
-        else:
-            user_options = {}
 
         service = yield self.get_service()
         if service is None:
-            # Validate state
-            if hasattr(self, 'container_spec') \
-                    and self.container_spec is not None:
-                container_spec = dict(**self.container_spec)
-            elif user_options == {}:
-                self.log.error(
-                    "User: {} is trying to create a service"
-                    " without a container_spec".format(self.user))
-                raise Exception("That notebook is missing a specification"
-                                "to launch it, contact the admin to resolve "
-                                "this issue")
+            # Setup TaskTemplate params
+            user_options = dict(**self.user_options)
+            container_spec = dict(**self.container_spec)
+            resources = dict(**self.resources)
+            restart_policy = dict(**self.restart_policy)
+            placement = dict(**self.placement)
+            networks = dict(**self.networks)
 
-            # Setup service
-            container_spec.update(user_options.get('container_spec', {}))
+            # User options
+            if self.use_user_options:
+                container_spec.update(self.user_options)
 
-            # Which image to spawn
-            if self.use_user_options and 'user_selected_image' in user_options:
-                uimage = user_options['user_selected_image']
-                image_info = None
-                for di in self.dockerimages:
-                    if di['image'] == uimage:
-                        image_info = copy.deepcopy(di)
-                if image_info is None:
-                    err_msg = "User selected image: {} couldn't be found" \
-                        .format(uimage['image'])
-                    self.log.error(err_msg)
-                    raise Exception(err_msg)
-            else:
-                # Default image
-                image_info = self.dockerimages[0]
-
-            self.log.debug("Image info: {}".format(image_info))
+            self.log.debug("Selected image: {}".format(container_spec['image']))
             # Does that image have restricted access
-            if 'access' in image_info and self.service_owner not in image_info['access']:
-                    self.log.error("User: {} tried to launch {} without access".format(
-                        self.service_owner, image_info['image']
-                    ))
-                    raise Exception("You don't have permission to launch that image")
 
-            self.log.debug("Container spec: {}".format(container_spec))
+            image = None
+            if 'image' in container_spec:
+                image = container_spec['image']
 
             # Setup mounts
             mounts = []
@@ -523,10 +517,6 @@ class SwarmSpawner(Spawner):
             if 'mounts' in container_spec:
                 mounts.extend(container_spec['mounts'])
             container_spec['mounts'] = []
-
-            # Image mounts
-            if 'mounts' in image_info:
-                mounts.extend(image_info['mounts'])
 
             for mount in mounts:
                 if isinstance(mount, dict):
@@ -612,9 +602,15 @@ class SwarmSpawner(Spawner):
                     {'configs': [ConfigReference(**c) for c in self.configs]})
 
             # Create the service
-            container_spec = ContainerSpec(image, **container_spec)
+            container_spec = ContainerSpec(**container_spec)
             resources = Resources(**resource_spec)
+            restart_policy = RestartPolicy(**restart_policy)
             placement = Placement(**placement)
+            task_templ = TaskTemplate(container_spec, resources,
+                                      restart_policy, placement)
+
+            resp = yield self.docker('create_service', task_templ,
+                                     name=self.service_name, networks=networks)
 
             task_spec = {'container_spec': container_spec,
                          'resources': resources,
@@ -626,14 +622,12 @@ class SwarmSpawner(Spawner):
                                      task_tmpl,
                                      name=self.service_name,
                                      networks=networks)
+
             self.service_id = resp['ID']
             self.log.info("Created Docker service {} (id: {}) from image {}"
                           " for user {}".format(self.service_name,
                                                 self.service_id[:7], image,
                                                 self.user))
-
-            yield self.wait_for_running_tasks()
-
         else:
             self.log.info(
                 "Found existing Docker service '{}' (id: {})".format(
