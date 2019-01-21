@@ -28,6 +28,6 @@ deploy:
   on:
     tags: true
     python: 3.7
-    branch: master
+    branch: devel
 notifications: 
   slack: raz-s:se1PurXsQJv03nBZa9XWMOOS

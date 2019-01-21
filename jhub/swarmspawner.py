@@ -467,7 +467,7 @@ class SwarmSpawner(Spawner):
         self.log.info("User: {}, start spawn".format(self.user.__dict__))
 
         # https://github.com/jupyterhub/jupyterhub
-        # /blob/master/jupyterhub/user.py#L202
+        # /blob/devel/jupyterhub/user.py#L202
         # By default jupyterhub calls the spawner passing user_options
         if self.use_user_options:
             user_options = self.user_options
