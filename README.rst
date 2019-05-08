@@ -2,7 +2,7 @@
 jhub-SwarmSpawner
 ==============================
 
-.. image:: https://travis-ci.org/rasmunk/SwarmSpawner.svg?branch=master
+.. image:: https://travis-ci.org/rasmunk/SwarmSpawner.svg?branch=devel
     :target: https://travis-ci.org/rasmunk/SwarmSpawner
 
 
