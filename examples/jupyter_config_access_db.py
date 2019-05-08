@@ -23,3 +23,13 @@ c.SwarmSpawner.container_spec = {
     # The command to run inside the service
     'env': {'JUPYTER_ENABLE_LAB': '1'}
 }
+
+c.SwarmSpawner.use_user_options = True
+db_path = os.path.join('/srv/jupyterhub', 'access_db.txt')
+
+c.SwarmSpawner.dockerimages = [
+    {
+        'name': 'base notebook',
+        'image': 'nielsbohr/base-notebook',
+        'access': db_path}
+]
