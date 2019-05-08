@@ -19,13 +19,7 @@ c.SwarmSpawner.jupyterhub_service_name = 'jupyterhub'
 
 c.SwarmSpawner.networks = ["jupyterhub_default"]
 
-home_dir = '/home/jovyan/work'
-mounts = [{'type': 'bind',
-           'source': '/tmp',
-           'target': home_dir}]
-
 c.SwarmSpawner.container_spec = {
     # The command to run inside the service
-    'env': {'JUPYTER_ENABLE_LAB': '1'},
-    'mounts': mounts
+    'env': {'JUPYTER_ENABLE_LAB': '1'}
 }

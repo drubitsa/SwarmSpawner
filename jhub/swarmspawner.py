@@ -3,6 +3,7 @@ A Spawner for JupyterHub that runs each user's
 server in a separate Docker Service
 """
 
+import os
 import hashlib
 import docker
 import copy
@@ -30,6 +31,7 @@ from traitlets import (
     Int
 )
 from jhub.mount import VolumeMounter
+from jhub.util import recursive_format
 
 class UnicodeOrFalse(Unicode):
     info_text = 'a unicode string or False'
@@ -190,12 +192,12 @@ class SwarmSpawner(Spawner):
     def service_owner(self):
         if self._service_owner is None:
             if hasattr(self.user, 'real_name'):
-                self._service_owner = self.user.real_name[-39:]
+                self._service_owner = self.user.real_name[-32:]
             elif hasattr(self.user, 'name'):
                 # Maximum 63 characters, 10 are comes from the underlying format
                 # i.e. prefix=jupyter-, postfix=-1
-                # get up to last 40 characters as service identifier
-                self._service_owner = self.user.name[-39:]
+                # get up to last 32 characters as service identifier
+                self._service_owner = self.user.name[-32:]
             else:
                 m = hashlib.md5()
                 _id = ''.join(random.choice(
@@ -298,11 +300,7 @@ class SwarmSpawner(Spawner):
             JPY_HUB_PREFIX=self.hub.server.base_url
         ))
 
-        if self.notebook_dir:
-            env['NOTEBOOK_DIR'] = self.notebook_dir
-
         env['JPY_HUB_API_URL'] = self._public_hub_api_url()
-
         return env
 
     def _docker(self, method, *args, **kwargs):
@@ -506,6 +504,31 @@ class SwarmSpawner(Spawner):
 
             self.log.debug("Selected image: {}".format(container_spec['image']))
             # Does that image have restricted access
+            if 'access' in image_info:
+                # Check for static or db users
+                allowed = False
+                if self.service_owner in image_info['access']:
+                    allowed = True
+                else:
+                    if os.path.exists(image_info['access']):
+                        db_path = image_info['access']
+                        try:
+                            self.log.info("Checking db: {} for "
+                                          "User: {}".format(db_path,
+                                                            self.service_owner))
+                            with open(db_path, 'r') as db:
+                                users = [user.rstrip('\n').rstrip('\r\n') for user in db]
+                                if self.service_owner in users:
+                                    allowed = True
+                        except IOError as err:
+                            self.log.error("User: {} tried to open db file {},"
+                                           "Failed {}".format(self.service_owner,
+                                                              db_path, err))
+                if not allowed:
+                    self.log.error("User: {} tried to launch {} without access"
+                                   .format(
+                                       self.service_owner, image_info['image']))
+                    raise Exception("You don't have permission to launch that image")
 
             image = None
             if 'image' in container_spec:
@@ -525,7 +548,8 @@ class SwarmSpawner(Spawner):
                 else:
                     # Expects a mount_class that supports 'create'
                     if hasattr(self.user, 'data'):
-                        m = yield mount.create(self.user.data, owner=self.service_owner)
+                        m = yield mount.create(self.user.data,
+                                               owner=self.service_owner)
                     else:
                         m = yield mount.create(owner=self.service_owner)
                 container_spec['mounts'].append(m)
@@ -535,6 +559,35 @@ class SwarmSpawner(Spawner):
                 container_spec['env'].update(self.get_env())
             else:
                 container_spec['env'] = self.get_env()
+
+            # Env of image
+            if 'env' in image_info and isinstance(image_info['env'], dict):
+                container_spec['env'].update(image_info['env'])
+
+            # Dynamic update of env values
+            for env_key, env_value in container_spec['env'].items():
+                stripped_value = env_value.lstrip('{').rstrip('}')
+                if hasattr(self, stripped_value) \
+                        and isinstance(getattr(self, stripped_value), str):
+                    container_spec['env'][env_key] = getattr(self, stripped_value)
+                if hasattr(self.user, stripped_value) \
+                        and isinstance(getattr(self.user, stripped_value), str):
+                    container_spec['env'][env_key] = getattr(self.user,
+                                                             stripped_value)
+                if hasattr(self.user, 'data') \
+                        and hasattr(self.user.data, stripped_value)\
+                        and isinstance(getattr(self.user.data, stripped_value), str):
+                    container_spec['env'][env_key] = getattr(self.user.data,
+                                                             stripped_value)
+
+            # Args of image
+            if 'args' in image_info and isinstance(image_info['args'], list):
+                container_spec.update({'args': image_info['args']})
+
+            if 'command' in image_info and isinstance(image_info['command'], list)\
+                    or 'command' in image_info and \
+                    isinstance(image_info['command'], str):
+                container_spec.update({'command': image_info['command']})
 
             # Log mounts config
             self.log.debug("User: {} container_spec mounts: {}".format(
@@ -600,6 +653,64 @@ class SwarmSpawner(Spawner):
 
                 container_spec.update(
                     {'configs': [ConfigReference(**c) for c in self.configs]})
+
+            # Global container user
+            uid_gid = None
+            if 'uid_gid' in container_spec:
+                uid_gid = copy.deepcopy(container_spec['uid_gid'])
+                del container_spec['uid_gid']
+
+            # Image user
+            if 'uid_gid' in image_info:
+                uid_gid = image_info['uid_gid']
+
+            self.log.info("gid info {}".format(uid_gid))
+            if isinstance(uid_gid, str):
+                if ":" in uid_gid:
+                    uid, gid = uid_gid.split(":")
+                else:
+                    uid, gid = uid_gid, None
+
+                if uid == '{uid}' and hasattr(self.user, 'uid') \
+                        and self.user.uid is not None:
+                    uid = self.user.uid
+
+                if gid is not None and gid == '{gid}' \
+                        and hasattr(self.user, 'gid') \
+                        and self.user.gid is not None:
+                    gid = self.user.gid
+
+                if uid:
+                    container_spec.update(
+                        {'user': str(uid)}
+                    )
+                if uid and gid:
+                    container_spec.update(
+                        {'user': str(uid) + ":" + str(gid)}
+                    )
+
+            # Global container user
+            if 'user' in container_spec:
+                container_spec['user'] = str(container_spec['user'])
+
+            # Image user
+            if 'user' in image_info:
+                container_spec.update({
+                    'user': str(image_info['user'])
+                })
+
+            dynamic_holders = [Spawner, self, self.user]
+            if hasattr(self.user, 'data'):
+                dynamic_holders.append(self.user.data)
+
+            # Expand container_spec before start
+            for construct in dynamic_holders:
+                try:
+                    if not hasattr(construct, '__dict__'):
+                        continue
+                    recursive_format(container_spec, construct.__dict__)
+                except TypeError:
+                    pass
 
             # Create the service
             container_spec = ContainerSpec(**container_spec)

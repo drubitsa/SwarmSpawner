@@ -19,8 +19,8 @@ c.SwarmSpawner.jupyterhub_service_name = 'jupyterhub'
 
 c.SwarmSpawner.networks = ["jupyterhub_default"]
 
-# Anonymous volume 
 home_dir = '/home/jovyan/work'
+
 mounts = [{'type': 'volume',
            'source': '',
            'target': home_dir}]
