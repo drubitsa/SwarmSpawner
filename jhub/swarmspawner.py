@@ -7,6 +7,7 @@ import os
 import hashlib
 import docker
 import copy
+import string
 from asyncio import sleep
 from async_generator import async_generator, yield_
 from textwrap import dedent
@@ -29,6 +30,7 @@ from traitlets import (
 )
 from jhub.mount import VolumeMounter
 from jhub.util import recursive_format
+from escapism import escape
 
 
 class UnicodeOrFalse(Unicode):
@@ -199,7 +201,17 @@ class SwarmSpawner(Spawner):
             return (self.tls_cert, self.tls_key)
         return None
 
+    _docker_safe_chars = set(string.ascii_letters + string.digits + "-")
+    _docker_escape_char = "_"
     _service_owner = None
+
+    def _escape(self, s):
+        """Escape a string to docker-safe characters"""
+        return escape(
+            s,
+            safe=self._docker_safe_chars,
+            escape_char=self._docker_escape_char,
+        )
 
     @property
     def service_owner(self):
@@ -215,7 +227,7 @@ class SwarmSpawner(Spawner):
                 self._service_owner = self.user.name[-32:]
             else:
                 self._service_owner = m.hexdigest()
-        return self._service_owner
+        return _escape(self._service_owner)
 
     @property
     def service_name(self):
