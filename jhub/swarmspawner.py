@@ -227,7 +227,7 @@ class SwarmSpawner(Spawner):
                 self._service_owner = self.user.name[-32:]
             else:
                 self._service_owner = m.hexdigest()
-        return _escape(self._service_owner)
+        return self._escape(self._service_owner)
 
     @property
     def service_name(self):
