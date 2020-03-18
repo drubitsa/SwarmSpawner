@@ -16,7 +16,7 @@ from pprint import pformat
 from docker.errors import APIError
 from docker.tls import TLSConfig
 from docker.types import TaskTemplate, Resources, ContainerSpec, Placement, \
-    ConfigReference
+    ConfigReference, EndpointSpec
 from docker.utils import kwargs_from_env
 from tornado import gen
 from jupyterhub.spawner import Spawner
@@ -179,6 +179,9 @@ class SwarmSpawner(Spawner):
                     help=dedent(
                         """Additional args to create_host_config for service create
                         """))
+
+    endpoint_spec = Dict({}, config=True, help="Params to specify service endpoints")
+
     configs = List(trait=Dict(),
                    config=True, help=dedent("""Configs to attach to the service"""))
 
@@ -622,6 +625,11 @@ class SwarmSpawner(Spawner):
             if user_options.get('networks') is not None:
                 networks = user_options.get('networks')
 
+            # Service endpoints
+            endpoint_spec = None
+            if hasattr(self, 'endpoint_spec'):
+                endpoint_spec = self.endpoint_spec
+
             # Global placement
             placement = None
             if hasattr(self, 'placement'):
@@ -733,6 +741,7 @@ class SwarmSpawner(Spawner):
             container_spec = ContainerSpec(image, **container_spec)
             resources = Resources(**resource_spec)
             placement = Placement(**placement)
+            endpoint_spec = EndpointSpec(**endpoint_spec)
 
             task_spec = {'container_spec': container_spec,
                          'resources': resources,
@@ -743,7 +752,8 @@ class SwarmSpawner(Spawner):
             resp = yield self.docker('create_service',
                                      task_tmpl,
                                      name=self.service_name,
-                                     networks=networks)
+                                     networks=networks,
+                                     endpoint_spec=endpoint_spec)
             self.service_id = resp['ID']
             self.log.info("Created Docker service {} (id: {}) from image {}"
                           " for user {}".format(self.service_name,
