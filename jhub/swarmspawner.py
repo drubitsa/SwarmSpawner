@@ -775,8 +775,9 @@ class SwarmSpawner(Spawner):
                     self.api_token = line.split('=', 1)[1]
                     break
 
-        ip = self.service_name
-        port = self.service_port
+        #ip = self.service_name
+        #port = self.service_port
+        ip, port = yield self.get_ip_and_port()
         self.log.debug("Active service: '{}' with user '{}'".format(
             self.service_name, self.user))
 
@@ -853,3 +854,39 @@ class SwarmSpawner(Spawner):
             if not preparing:
                 attempt += 1
             yield gen.sleep(1)
+
+    @gen.coroutine
+    def get_ip_and_port(self):
+        """Queries Docker daemon for service's IP and port.
+        If you are using network_mode=host, you will need to override
+        this method as follows::
+            @gen.coroutine
+            def get_ip_and_port(self):
+                return self.host_ip, self.port
+        You will need to make sure host_ip and port
+        are correct, which depends on the route to the service
+        and the port it opens.
+        """
+        if self.use_internal_hostname or self.use_internal_ip:
+            ip = self.service_name
+            port = self.port
+        else:
+            # discover published ip, port
+            ip = self.host_ip
+            service = yield self.get_object()
+            for port_config in service["Endpoint"]["Ports"]:
+                if port_config.get("TargetPort") == self.port:
+                    port = port_config["PublishedPort"]
+                    break
+
+            else:
+                self.log.error(
+                    "Couldn't find PublishedPort for %s in %s",
+                    self.port,
+                    service["Endpoint"]["Ports"],
+                )
+                raise RuntimeError(
+                    "Couldn't identify port for service %s", self.service_name
+                )
+
+        return ip, port
